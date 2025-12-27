@@ -1,10 +1,66 @@
 [
   {
     "id": 1,
-    "title": "Study",
-    "description": "Get to study for 4 hours.",
+    "title": "Play Cricket",
+    "description": "Go to play cricket after 5:00, just play only 2 games and return home.",
+    "completed": false,
+    "created_at": "2025-12-27T16:56:01.275643",
+    "updated_at": "2025-12-27T16:56:01.275643"
+  },
+  {
+    "id": 2,
+    "title": "Buy Groceries",
+    "description": "Pick up milk, eggs, bread, and fresh spinach from the local market.",
     "completed": true,
-    "created_at": "2025-12-27T13:04:14.119638",
-    "updated_at": "2025-12-27T13:05:28.132847"
+    "created_at": "2025-12-27T16:58:18.846920",
+    "updated_at": "2025-12-27T17:03:31.005211"
+  },
+  {
+    "id": 3,
+    "title": "Update Resume",
+    "description": "Add the most recent project accomplishments and update professional skill keywords.",
+    "completed": false,
+    "created_at": "2025-12-27T16:58:33.633938",
+    "updated_at": "2025-12-27T16:58:33.633938"
+  },
+  {
+    "id": 4,
+    "title": "Read a Book",
+    "description": "Finish at least two chapters of the current novel before going to bed.",
+    "completed": true,
+    "created_at": "2025-12-27T16:58:42.399021",
+    "updated_at": "2025-12-27T17:04:00.439672"
+  },
+  {
+    "id": 5,
+    "title": "Plan Summer Trip",
+    "description": "Research potential flight dates and compare hotel prices for the upcoming vacation.",
+    "completed": false,
+    "created_at": "2025-12-27T16:58:50.720251",
+    "updated_at": "2025-12-27T16:58:50.720251"
+  },
+  {
+    "id": 6,
+    "title": "Pay Electric Bill",
+    "description": "Log into the utility portal and submit the monthly payment before the due date.",
+    "completed": false,
+    "created_at": "2025-12-27T16:58:58.416156",
+    "updated_at": "2025-12-27T16:58:58.416156"
+  },
+  {
+    "id": 7,
+    "title": "Morning Workout",
+    "description": "Complete a 45-minute strength training routine to start the day with energy.",
+    "completed": true,
+    "created_at": "2025-12-27T16:59:08.198732",
+    "updated_at": "2025-12-27T17:04:14.585036"
+  },
+  {
+    "id": 8,
+    "title": "Backup Computer",
+    "description": "Backup the computer so that all work is safe from any loss.",
+    "completed": false,
+    "created_at": "2025-12-27T16:59:14.479112",
+    "updated_at": "2025-12-27T17:02:09.584712"
   }
 ]

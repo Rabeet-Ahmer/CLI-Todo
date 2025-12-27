@@ -354,17 +354,20 @@ def interactive_mode():
     print("  delete <id>                  - Delete a task")
     print("  help                         - Show this help message")
     print("  q/quit/exit                  - Exit the application")
-    print("-" * 60)
+    print("-" * 80)
 
     while True:
         try:
-            user_input = input("todo> ").strip()
+            user_input = input("\ntodo> ").strip()
 
             if not user_input:
                 continue
 
-            # Parse the input into command and arguments
-            parts = user_input.split()
+            # Parse the input into command and arguments, handling quoted strings
+            import re
+            pattern = r'"([^"]*)"|\'([^\']*)\'|(\S+)'
+            matches = re.findall(pattern, user_input)
+            parts = [match[0] or match[1] or match[2] for match in matches]
             command = parts[0].lower() if parts else ""
 
             # Check for quit commands
