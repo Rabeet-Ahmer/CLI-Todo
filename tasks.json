@@ -1,0 +1,10 @@
+[
+  {
+    "id": 1,
+    "title": "Study",
+    "description": "Get to study for 4 hours.",
+    "completed": true,
+    "created_at": "2025-12-27T13:04:14.119638",
+    "updated_at": "2025-12-27T13:05:28.132847"
+  }
+]
