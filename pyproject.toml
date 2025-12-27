@@ -7,4 +7,8 @@ license = {text = "MIT"}
 requires-python = ">=3.11"
 dependencies = [
     "click>=8.0.0",
+    "inquirer>=3.0.0",
 ]
+
+[project.scripts]
+todo = "main:cli"
