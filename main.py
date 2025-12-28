@@ -776,20 +776,20 @@ class TaskManager:
                         next_date = datetime(year, month, day).date()
                     except ValueError:
                         # If day doesn't exist in that month, use last day of month
-                        if month in [5, 7, 10, 12]:  # Months with 30 days
-                            next_date = datetime(year, month, 30).date()
-                        elif month == 3:  # February
+                        if month in [4, 6, 9, 11]:  # Months with 30 days (April, June, September, November)
+                         next_date = datetime(year, month, 30).date()
+                        elif month == 2:  # February
                             if year % 4 == 0 and (year % 100 != 0 or year % 400 == 0):
                                 next_date = datetime(year, 2, 29).date()  # Leap year
                             else:
                                 next_date = datetime(year, 2, 28).date()
-                        else:  # Months with 31 days
+                        else:  # Months with 31 days (1, 3, 5, 7, 8, 10, 12)
                             next_date = datetime(year, month, 31).date()
                 else:
                     continue  # Unknown pattern, skip
 
                 # If it's time to create a new instance
-                if next_date <= today:
+                while next_date <= today:
                     # Create a new instance of the recurring task
                     new_task = Task(
                         id=self.next_id,
@@ -804,6 +804,32 @@ class TaskManager:
                     self.tasks.append(new_task)
                     self.next_id += 1
                     logger.info(f"Created new instance of recurring task: {task.title}")
+
+                    if task.recurrence_pattern == 'daily':
+                        next_date = next_date + timedelta(days=task.recurrence_interval)
+                    elif task.recurrence_pattern == 'weekly':
+                        next_date = next_date + timedelta(weeks=task.recurrence_interval)
+                    elif task.recurrence_pattern == 'monthly':
+                        # Recalculate monthly (similar logic as above)
+                        year = next_date.year
+                        month = next_date.month + task.recurrence_interval
+                        day = next_date.day
+                        while month > 12:
+                            year += 1
+                            month -= 12
+                        try:
+                            next_date = datetime(year, month, day).date()
+                        except ValueError:
+                            # Handle day overflow (same logic as above)
+                            if month in [4, 6, 9, 11]:
+                                next_date = datetime(year, month, 30).date()
+                            elif month == 2:
+                                if year % 4 == 0 and (year % 100 != 0 or year % 400 == 0):
+                                    next_date = datetime(year, 2, 29).date()
+                                else:
+                                    next_date = datetime(year, 2, 28).date()
+                            else:
+                                next_date = datetime(year, month, 31).date()
 
         self.save_tasks()
 
