@@ -5,6 +5,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Optional
 import click
+from rich.console import Console
+from rich.table import Table
+from rich.prompt import Prompt
+from rich.text import Text
+from rich import print as rprint
+from rich.panel import Panel
+from rich.box import ROUNDED
 
 
 # Set up basic logging configuration
@@ -475,6 +482,75 @@ def delete(task_id):
         click.get_current_context().exit(1)  # Exit with code 1 for general error
 
 
+@cli.group()
+def recurring():
+    """Manage recurring tasks - create repeating tasks that auto-reschedule"""
+    pass
+
+
+@recurring.command()
+@click.argument('title')
+@click.option('--description', '-desc', help='Task description')
+@click.option('--priority', '-p', default='medium', type=click.Choice(['high', 'medium', 'low']), help='Set priority level (high, medium, low) [default: medium]')
+@click.option('--tag', '-t', multiple=True, help='Add tag to task (can be used multiple times)')
+@click.option('--due-date', '-d', help='Set due date (YYYY-MM-DD format)')
+@click.option('--pattern', '-pt', default='weekly', type=click.Choice(['daily', 'weekly', 'monthly']), help='Recurrence pattern (daily, weekly, monthly) [default: weekly]')
+@click.option('--interval', '-i', default=1, type=int, help='Recurrence interval [default: 1]')
+def create(title, description, priority, tag, due_date, pattern, interval):
+    """Create a recurring task that auto-reschedules after completion
+
+    Examples:
+      todo recurring create "Weekly team meeting" --pattern weekly --interval 1
+      todo recurring create "Daily workout" --pattern daily --interval 1
+      todo recurring create "Monthly report" --pattern monthly --interval 1
+    """
+    task_manager = TaskManager()
+
+    # Sanitize inputs
+    title = sanitize_input(title)
+    description = sanitize_input(description)
+    priority = sanitize_input(priority)
+    due_date = sanitize_input(due_date)
+    # Sanitize tags
+    sanitized_tags = [sanitize_input(t) for t in tag] if tag else []
+
+    # Validate inputs
+    if not validate_task_title(title):
+        click.echo("Error: Task title must be non-empty and less than 255 characters.", err=True)
+        click.get_current_context().exit(2)  # Exit with code 2 for input error
+
+    if description and not validate_task_description(description):
+        click.echo("Error: Task description must be less than 1000 characters.", err=True)
+        click.get_current_context().exit(2)  # Exit with code 2 for input error
+
+    if priority and not validate_task_priority(priority):
+        click.echo("Error: Priority must be one of: high, medium, low", err=True)
+        click.get_current_context().exit(4)  # Exit with code 4 for invalid priority
+
+    if sanitized_tags and not validate_task_tags(sanitized_tags):
+        click.echo("Error: Tags must be 1-50 alphanumeric characters (hyphens/underscores allowed)", err=True)
+        click.get_current_context().exit(6)  # Exit with code 6 for invalid tag
+
+    if due_date and not validate_task_due_date(due_date):
+        click.echo("Error: Date must be in YYYY-MM-DD format", err=True)
+        click.get_current_context().exit(5)  # Exit with code 5 for invalid date
+
+    # Create recurring task
+    task = task_manager.add_task(
+        title=title,
+        description=description,
+        priority=priority,
+        tags=sanitized_tags,
+        due_date=due_date,
+        is_recurring=True,
+        recurrence_pattern=pattern,
+        recurrence_interval=interval
+    )
+
+    click.echo(f"Recurring task created successfully with ID: {task.id}")
+    click.echo(f"Task will repeat {pattern} (every {interval} {pattern if interval == 1 else pattern + 's'})")
+
+
 @dataclass
 class Task:
     """Task data class with id, title, description, completed, created_at, updated_at, priority, tags, due_date attributes"""
@@ -487,6 +563,10 @@ class Task:
     priority: str = "medium"  # Values: "high", "medium", "low"
     tags: List[str] = None   # List of tag strings
     due_date: Optional[str] = None  # ISO format date string (YYYY-MM-DD or ISO 8601)
+    # Recurring task fields
+    is_recurring: bool = False  # Whether this is a recurring task template
+    recurrence_pattern: Optional[str] = None  # Pattern: daily, weekly, monthly
+    recurrence_interval: int = 1  # Interval for recurrence
 
     def __post_init__(self):
         if not self.created_at:
@@ -506,7 +586,7 @@ class TaskManager:
         self.data_file = data_file
         self.load_tasks()
 
-    def add_task(self, title: str, description: Optional[str] = None, priority: str = "medium", tags: Optional[List[str]] = None, due_date: Optional[str] = None) -> Task:
+    def add_task(self, title: str, description: Optional[str] = None, priority: str = "medium", tags: Optional[List[str]] = None, due_date: Optional[str] = None, is_recurring: bool = False, recurrence_pattern: Optional[str] = None, recurrence_interval: int = 1) -> Task:
         """Add a new task to the collection with auto-incrementing ID and timestamp generation"""
         task = Task(
             id=self.next_id,
@@ -514,7 +594,10 @@ class TaskManager:
             description=description,
             priority=priority,
             tags=tags if tags is not None else [],
-            due_date=due_date
+            due_date=due_date,
+            is_recurring=is_recurring,
+            recurrence_pattern=recurrence_pattern,
+            recurrence_interval=recurrence_interval
         )
         self.tasks.append(task)
         logger.info(f"Added task {task.id}: {task.title}")
@@ -575,6 +658,11 @@ class TaskManager:
             task.updated_at = datetime.now().isoformat()
             logger.info(f"Toggled task {task.id} status: {old_status} -> {new_status}")
             self.save_tasks()
+
+            # If this was a recurring task that was just completed, check if we need to create a new instance
+            if task.completed and task.is_recurring:
+                self.check_and_create_recurring_tasks()
+
             return task
         logger.warning(f"Complete task failed: Task with ID {task_id} not found")
         return None
@@ -590,11 +678,12 @@ class TaskManager:
         logger.warning(f"Delete task failed: Task with ID {task_id} not found")
         return False
 
+
     def save_tasks(self):
         """JSON persistence functionality for tasks"""
         data = []
         for task in self.tasks:
-            data.append({
+            task_data = {
                 'id': task.id,
                 'title': task.title,
                 'description': task.description,
@@ -604,7 +693,14 @@ class TaskManager:
                 'priority': task.priority,
                 'tags': task.tags,
                 'due_date': task.due_date
-            })
+            }
+            # Add recurring task fields if they have values
+            if task.is_recurring:
+                task_data['is_recurring'] = task.is_recurring
+                task_data['recurrence_pattern'] = task.recurrence_pattern
+                task_data['recurrence_interval'] = task.recurrence_interval
+
+            data.append(task_data)
 
         with open(self.data_file, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2)
@@ -630,7 +726,10 @@ class TaskManager:
                         updated_at=item.get('updated_at', ''),
                         priority=item.get('priority', 'medium'),  # Default to medium for backward compatibility
                         tags=item.get('tags', []),  # Default to empty list for backward compatibility
-                        due_date=item.get('due_date')  # Default to None for backward compatibility
+                        due_date=item.get('due_date'),  # Default to None for backward compatibility
+                        is_recurring=item.get('is_recurring', False),
+                        recurrence_pattern=item.get('recurrence_pattern'),
+                        recurrence_interval=item.get('recurrence_interval', 1)
                     )
                     self.tasks.append(task)
 
@@ -645,6 +744,68 @@ class TaskManager:
                 self.next_id = 1
         else:
             logger.info(f"Task file {self.data_file} does not exist, starting with empty task list")
+
+    def check_and_create_recurring_tasks(self):
+        """Check recurring tasks and create new instances when needed"""
+        from datetime import datetime, timedelta
+
+        today = datetime.now().date()
+
+        for task in self.tasks:
+            if task.is_recurring and task.completed:
+                # Calculate next occurrence based on pattern
+                last_completed = datetime.fromisoformat(task.updated_at.split('.')[0]).date()
+
+                if task.recurrence_pattern == 'daily':
+                    next_date = last_completed + timedelta(days=task.recurrence_interval)
+                elif task.recurrence_pattern == 'weekly':
+                    next_date = last_completed + timedelta(weeks=task.recurrence_interval)
+                elif task.recurrence_pattern == 'monthly':
+                    # Simple monthly calculation (add months)
+                    year = last_completed.year
+                    month = last_completed.month + task.recurrence_interval
+                    day = last_completed.day
+
+                    # Handle year overflow
+                    while month > 12:
+                        year += 1
+                        month -= 12
+
+                    # Handle day overflow for months with fewer days
+                    try:
+                        next_date = datetime(year, month, day).date()
+                    except ValueError:
+                        # If day doesn't exist in that month, use last day of month
+                        if month in [5, 7, 10, 12]:  # Months with 30 days
+                            next_date = datetime(year, month, 30).date()
+                        elif month == 3:  # February
+                            if year % 4 == 0 and (year % 100 != 0 or year % 400 == 0):
+                                next_date = datetime(year, 2, 29).date()  # Leap year
+                            else:
+                                next_date = datetime(year, 2, 28).date()
+                        else:  # Months with 31 days
+                            next_date = datetime(year, month, 31).date()
+                else:
+                    continue  # Unknown pattern, skip
+
+                # If it's time to create a new instance
+                if next_date <= today:
+                    # Create a new instance of the recurring task
+                    new_task = Task(
+                        id=self.next_id,
+                        title=task.title,
+                        description=task.description,
+                        completed=False,  # New instance is not completed
+                        priority=task.priority,
+                        tags=task.tags,
+                        due_date=task.due_date,
+                        is_recurring=False  # New instance is not a template
+                    )
+                    self.tasks.append(new_task)
+                    self.next_id += 1
+                    logger.info(f"Created new instance of recurring task: {task.title}")
+
+        self.save_tasks()
 
 
 def validate_task_title(title: str) -> bool:
@@ -762,6 +923,8 @@ def generate_timestamp() -> str:
     return datetime.now().isoformat()
 
 
+
+
 def interactive_mode():
     """Run the CLI application in interactive mode with a menu-driven interface"""
     try:
@@ -771,8 +934,20 @@ def interactive_mode():
         return
 
     task_manager = TaskManager()
-    print("Welcome to the CLI Todo Application!")
-    print("Use arrow keys to navigate and Enter to select.")
+    # Check for recurring tasks that need to be created
+    task_manager.check_and_create_recurring_tasks()
+
+    console = Console()
+
+    # Welcome panel with loading effect
+    with console.status("[bold green]Loading application...", spinner="clock"):
+        import time
+        time.sleep(0.5)  # Simulate loading
+
+    # Welcome panel
+    welcome_text = Text("Welcome to the CLI Todo Application!", style="bold blue")
+    welcome_text.append("\nUse arrow keys to navigate and Enter to select.", style="italic")
+    console.print(Panel(welcome_text, title="📋 Todo App", expand=False, border_style="green"))
 
     while True:
         try:
@@ -781,50 +956,56 @@ def interactive_mode():
                 inquirer.List('action',
                              message="Select an operation",
                              choices=[
-                                 'Add',
-                                 'List',
-                                 'Complete',
-                                 'Update',
-                                 'Delete',
-                                 'Search',
-                                 'Tag',
-                                 'Help',
-                                 'Exit'
+                                 'Add 📝',
+                                 'List 📋',
+                                 'Complete ✅',
+                                 'Update 🔄',
+                                 'Delete 🗑️',
+                                 'Search 🔍',
+                                 'Tag 🏷️',
+                                 'Help ❓',
+                                 'Exit 🚪'
                              ])
             ]
 
             main_answer = inquirer.prompt(main_questions)
             if not main_answer:  # User pressed Ctrl+C
-                print("\nGoodbye!")
+                console.print("\n[yellow]Goodbye![/yellow]")
                 break
 
             action = main_answer['action'].lower()
 
-            if action == 'add':
+            # Add loading indicator for operations that might take time
+            if 'list' in action or 'search' in action:
+                with console.status(f"[bold green]Loading {action}...", spinner="clock"):
+                    import time
+                    time.sleep(0.2)  # Simulate loading
+
+            if 'add' in action:
                 add_task_interactive(task_manager)
-            elif action == 'list':
+            elif 'list' in action:
                 list_tasks_interactive(task_manager)
-            elif action == 'complete':
+            elif 'complete' in action:
                 complete_task_interactive(task_manager)
-            elif action == 'update':
+            elif 'update' in action:
                 update_task_interactive(task_manager)
-            elif action == 'delete':
+            elif 'delete' in action:
                 delete_task_interactive(task_manager)
-            elif action == 'search':
+            elif 'search' in action:
                 search_tasks_interactive(task_manager)
-            elif action == 'tag':
+            elif 'tag' in action:
                 tag_tasks_interactive(task_manager)
-            elif action == 'help':
+            elif 'help' in action:
                 show_help_interactive()
-            elif action == 'exit':
-                print("Goodbye!")
+            elif 'exit' in action:
+                console.print("[yellow]Goodbye![/yellow]")
                 break
 
         except KeyboardInterrupt:
-            print("\nGoodbye!")
+            console.print("\n[yellow]Goodbye![/yellow]")
             break
         except EOFError:
-            print("\nGoodbye!")
+            console.print("\n[yellow]Goodbye![/yellow]")
             break
 
 
@@ -832,6 +1013,7 @@ def add_task_interactive(task_manager):
     """Interactive task addition with guided prompts"""
     try:
         import inquirer
+        console = Console()
 
         # Get title
         title_question = [
@@ -843,12 +1025,51 @@ def add_task_interactive(task_manager):
 
         title = sanitize_input(title_answer['title'])
         if not title:
-            print("Error: Task title cannot be empty.")
+            console.print("[red]Error: Task title cannot be empty.[/red]")
+            input("Press Enter to continue...")
             return
 
         if not validate_task_title(title):
-            print("Error: Task title must be less than 255 characters.")
+            console.print("[red]Error: Task title must be less than 255 characters.[/red]")
+            input("Press Enter to continue...")
             return
+
+        # Ask if the task is recurring
+        recurring_question = [
+            inquirer.Confirm('is_recurring',
+                           message="Is this a recurring task (will auto-repeat after completion)?")
+        ]
+        recurring_answer = inquirer.prompt(recurring_question)
+        if not recurring_answer:
+            return  # User cancelled
+        is_recurring = recurring_answer['is_recurring']
+
+        # If it's recurring, get recurrence details
+        recurrence_pattern = None
+        recurrence_interval = 1
+        if is_recurring:
+            pattern_question = [
+                inquirer.List('pattern',
+                             message="Select recurrence pattern",
+                             choices=['daily', 'weekly', 'monthly'])
+            ]
+            pattern_answer = inquirer.prompt(pattern_question)
+            if not pattern_answer:
+                return  # User cancelled
+            recurrence_pattern = pattern_answer['pattern']
+
+            # Get interval
+            try:
+                interval_input = Prompt.ask(f"Enter recurrence interval (e.g., 1 for every {recurrence_pattern}, 2 for every 2 {recurrence_pattern}s)", default="1")
+                recurrence_interval = int(interval_input)
+                if recurrence_interval < 1:
+                    console.print("[red]Error: Interval must be at least 1.[/red]")
+                    input("Press Enter to continue...")
+                    return
+            except ValueError:
+                console.print("[red]Error: Interval must be a number.[/red]")
+                input("Press Enter to continue...")
+                return
 
         # Get description
         desc_question = [
@@ -860,7 +1081,8 @@ def add_task_interactive(task_manager):
 
         description = sanitize_input(desc_answer['description']) or None
         if description and not validate_task_description(description):
-            print("Error: Task description must be less than 1000 characters.")
+            console.print("[red]Error: Task description must be less than 1000 characters.[/red]")
+            input("Press Enter to continue...")
             return
 
         # Get priority
@@ -875,46 +1097,75 @@ def add_task_interactive(task_manager):
         priority = priority_answer['priority']
 
         # Get tags
-        tags_input = input("Enter tags separated by commas (optional, press Enter to skip): ").strip()
+        tags_input = Prompt.ask("Enter tags separated by commas (optional, press Enter to skip)", default="")
         tags = []
         if tags_input:
             tags = [sanitize_input(tag.strip()) for tag in tags_input.split(',') if tag.strip()]
             if not validate_task_tags(tags):
-                print("Error: Tags must be 1-50 alphanumeric characters (hyphens/underscores allowed)")
+                console.print("[red]Error: Tags must be 1-50 alphanumeric characters (hyphens/underscores allowed)[/red]")
+                input("Press Enter to continue...")
                 return
 
         # Get due date
-        due_date_input = input("Enter due date (YYYY-MM-DD format, optional, press Enter to skip): ").strip()
+        due_date_input = Prompt.ask("Enter due date (YYYY-MM-DD format, optional, press Enter to skip)", default="")
         due_date = None
         if due_date_input:
             due_date = sanitize_input(due_date_input)
             if not validate_task_due_date(due_date):
-                print("Error: Date must be in YYYY-MM-DD format")
+                console.print("[red]Error: Date must be in YYYY-MM-DD format[/red]")
+                input("Press Enter to continue...")
                 return
 
         # Confirm and add task
+        task_details = f"Title: {title}\nDescription: {description or '(none)'}\nPriority: {priority}\nTags: {tags or '(none)'}\nDue Date: {due_date or '(none)'}\nRecurring: {'Yes' if is_recurring else 'No'}"
+        if is_recurring:
+            task_details += f"\nPattern: {recurrence_pattern} (every {recurrence_interval} {recurrence_pattern if recurrence_interval == 1 else recurrence_pattern + 's'})"
+        console.print(Panel(task_details, title="Task Details", border_style="blue"))
+
         confirm_question = [
             inquirer.Confirm('confirm',
-                           message=f"Add task '{title}' with description '{description}', priority '{priority}', tags {tags}, due date '{due_date}'?")
+                           message="Add this task?")
         ]
         confirm_answer = inquirer.prompt(confirm_question)
         if not confirm_answer or not confirm_answer['confirm']:
-            print("Task addition cancelled.")
+            console.print("[yellow]Task addition cancelled.[/yellow]")
+            input("Press Enter to continue...")
             return
 
-        task = task_manager.add_task(title, description, priority, tags, due_date)
-        print(f"Task added successfully with ID: {task.id}")
+        # Show loading indicator while adding task
+        with console.status("[bold green]Adding task...", spinner="clock"):
+            import time
+            time.sleep(0.3)  # Simulate processing time
+            task = task_manager.add_task(
+                title=title,
+                description=description,
+                priority=priority,
+                tags=tags,
+                due_date=due_date,
+                is_recurring=is_recurring,
+                recurrence_pattern=recurrence_pattern,
+                recurrence_interval=recurrence_interval if is_recurring else 1
+            )
+
+        console.print(f"[green]✓ Task added successfully with ID: {task.id}[/green]")
+        if is_recurring:
+            console.print(f"[blue]ℹ️  This task will repeat {recurrence_pattern} (every {recurrence_interval} {recurrence_pattern if recurrence_interval == 1 else recurrence_pattern + 's'})[/blue]")
+        input("Press Enter to continue...")
 
     except KeyboardInterrupt:
-        print("\nOperation cancelled.")
+        console.print("\n[yellow]Operation cancelled.[/yellow]")
     except EOFError:
-        print("\nOperation cancelled.")
+        console.print("\n[yellow]Operation cancelled.[/yellow]")
+    except ValueError:
+        console.print("[red]Error: Invalid input.[/red]")
+        input("Press Enter to continue...")
 
 
 def list_tasks_interactive(task_manager):
     """Interactive task listing with filtering and sorting options"""
     try:
         import inquirer
+        console = Console()
 
         # Get filtering options
         filter_questions = [
@@ -1015,118 +1266,163 @@ def list_tasks_interactive(task_manager):
 
         # Display results
         if not tasks:
-            print("No tasks found matching the criteria.")
+            console.print("[yellow]No tasks found matching the criteria.[/yellow]")
             input("Press Enter to continue...")
             return
 
-        # Display with the new format that includes priority, description, and tags
-        print(f"{'ID':<4} {'Status':<8} {'Priority':<8} {'Title':<30} {'Description':<30} {'Due Date':<12} {'Tags'}")
-        print("-" * 120)
+        # Create a rich table for displaying tasks
+        table = Table(title="Task List", box=ROUNDED, border_style="blue")
+        table.add_column("ID", style="cyan", no_wrap=True)
+        table.add_column("Status", style="magenta")
+        table.add_column("Priority", style="green")
+        table.add_column("Title", style="bold")
+        table.add_column("Description")
+        table.add_column("Due Date", style="yellow")
+        table.add_column("Tags", style="dim")
+        table.add_column("Recurring", style="blue")
+
         for task in tasks:
-            status_indicator = "[x]" if task.completed else "[ ]"
+            status_indicator = "[green]✓[/green]" if task.completed else "[red]○[/red]"
+            priority_color = {"high": "[red]HIGH[/red]", "medium": "[yellow]MEDIUM[/yellow]", "low": "[green]LOW[/green]"}
+            priority_display = priority_color[task.priority]
+
             title = task.title[:27] + "..." if len(task.title) > 30 else task.title
             description = (task.description[:27] + "..." if task.description and len(task.description) > 30 else (task.description or "")) if task.description else ""
             due_date_str = task.due_date or ""
             tags_str = ",".join(task.tags) if task.tags else ""
-            print(f"{task.id:<4} {status_indicator:<8} {task.priority:<8} {title:<30} {description:<30} {due_date_str:<12} {tags_str}")
+            recurring_indicator = "[blue]🔄[/blue]" if task.is_recurring else ""
 
+            table.add_row(
+                str(task.id),
+                status_indicator,
+                priority_display,
+                title,
+                description,
+                due_date_str,
+                tags_str,
+                recurring_indicator
+            )
+
+        console.print(table)
         input("Press Enter to continue...")
 
     except KeyboardInterrupt:
-        print("\nOperation cancelled.")
+        console.print("\n[yellow]Operation cancelled.[/yellow]")
     except EOFError:
-        print("\nOperation cancelled.")
+        console.print("\n[yellow]Operation cancelled.[/yellow]")
 
 
 def complete_task_interactive(task_manager):
     """Interactive task completion"""
     try:
         import inquirer
+        console = Console()
 
         # Get all tasks to show as options
         tasks = task_manager.tasks
         if not tasks:
-            print("No tasks available.")
+            console.print("[yellow]No tasks available.[/yellow]")
             input("Press Enter to continue...")
             return
 
         # Create choices for task IDs
-        task_choices = [str(task.id) for task in tasks]
+        task_choices = [f"{task.id}: {task.title[:30]}{'...' if len(task.title) > 30 else ''}" for task in tasks]
         task_choices.append('(cancel)')
 
         task_question = [
-            inquirer.List('task_id',
+            inquirer.List('task',
                          message="Select task to complete/incomplete",
                          choices=task_choices)
         ]
 
         task_answer = inquirer.prompt(task_question)
-        if not task_answer or task_answer['task_id'] == '(cancel)':
+        if not task_answer or task_answer['task'] == '(cancel)':
             return  # User cancelled
 
-        task_id = int(task_answer['task_id'])
+        # Extract task ID from selection
+        selected_task_info = task_answer['task']
+        task_id = int(selected_task_info.split(':')[0])
+
         task = task_manager.find_task(task_id)
         if not task:
-            print(f"Error: Task with ID {task_id} not found.")
+            console.print(f"[red]Error: Task with ID {task_id} not found.[/red]")
             input("Press Enter to continue...")
             return
 
-        task_manager.complete_task(task_id)
+        # Show loading indicator while completing task
+        with console.status(f"[bold green]Toggling completion status for task {task_id}...", spinner="clock"):
+            import time
+            time.sleep(0.3)  # Simulate processing time
+            task_manager.complete_task(task_id)
+
         updated_task = task_manager.find_task(task_id)
         status = "completed" if updated_task.completed else "incomplete"
-        print(f"Task {task_id} marked as {status}.")
+        status_color = "[green]completed[/green]" if updated_task.completed else "[red]incomplete[/red]"
+        console.print(f"✓ Task [cyan]{task_id}[/cyan] marked as {status_color}.")
+
+        # If this was a recurring task that was just completed, mention the new instance
+        if updated_task.completed and updated_task.is_recurring:
+            console.print(f"[blue]ℹ️  This was a recurring task. A new instance has been created for future completion.[/blue]")
+
         input("Press Enter to continue...")
 
     except ValueError:
-        print("Error: Invalid task ID.")
+        console.print("[red]Error: Invalid task ID.[/red]")
         input("Press Enter to continue...")
     except KeyboardInterrupt:
-        print("\nOperation cancelled.")
+        console.print("\n[yellow]Operation cancelled.[/yellow]")
     except EOFError:
-        print("\nOperation cancelled.")
+        console.print("\n[yellow]Operation cancelled.[/yellow]")
 
 
 def update_task_interactive(task_manager):
     """Interactive task update"""
     try:
         import inquirer
+        console = Console()
 
         # Get all tasks to show as options
         tasks = task_manager.tasks
         if not tasks:
-            print("No tasks available.")
+            console.print("[yellow]No tasks available.[/yellow]")
             input("Press Enter to continue...")
             return
 
         # Create choices for task IDs
-        task_choices = [str(task.id) for task in tasks]
+        task_choices = [f"{task.id}: {task.title[:30]}{'...' if len(task.title) > 30 else ''}" for task in tasks]
         task_choices.append('(cancel)')
 
         task_question = [
-            inquirer.List('task_id',
+            inquirer.List('task',
                          message="Select task to update",
                          choices=task_choices)
         ]
 
         task_answer = inquirer.prompt(task_question)
-        if not task_answer or task_answer['task_id'] == '(cancel)':
+        if not task_answer or task_answer['task'] == '(cancel)':
             return  # User cancelled
 
-        task_id = int(task_answer['task_id'])
+        # Extract task ID from selection
+        selected_task_info = task_answer['task']
+        task_id = int(selected_task_info.split(':')[0])
+
         task = task_manager.find_task(task_id)
         if not task:
-            print(f"Error: Task with ID {task_id} not found.")
+            console.print(f"[red]Error: Task with ID {task_id} not found.[/red]")
             input("Press Enter to continue...")
             return
 
-        print(f"Current task details:")
-        print(f"  ID: {task.id}")
-        print(f"  Title: {task.title}")
-        print(f"  Description: {task.description or '(none)'}")
-        print(f"  Priority: {task.priority}")
-        print(f"  Tags: {', '.join(task.tags) if task.tags else '(none)'}")
-        print(f"  Due Date: {task.due_date or '(none)'}")
-        print(f"  Status: {'Completed' if task.completed else 'Pending'}")
+        # Display current task details in a panel
+        current_details = f"""
+ID: {task.id}
+Title: {task.title}
+Description: {task.description or '(none)'}
+Priority: {task.priority}
+Tags: {', '.join(task.tags) if task.tags else '(none)'}
+Due Date: {task.due_date or '(none)'}
+Status: {'[green]Completed[/green]' if task.completed else '[red]Pending[/red]'}
+        """
+        console.print(Panel(current_details.strip(), title="Current Task Details", border_style="blue"))
 
         # Ask what to update
         update_options = [
@@ -1157,7 +1453,7 @@ def update_task_interactive(task_manager):
                 if title and validate_task_title(title):
                     updates['title'] = title
                 else:
-                    print("Error: Invalid title.")
+                    console.print("[red]Error: Invalid title.[/red]")
                     continue
             elif field == 'description':
                 desc_question = [
@@ -1168,7 +1464,7 @@ def update_task_interactive(task_manager):
                     continue
                 description = sanitize_input(desc_answer['description']) or None
                 if description and not validate_task_description(description):
-                    print("Error: Invalid description.")
+                    console.print("[red]Error: Invalid description.[/red]")
                     continue
                 updates['description'] = description
             elif field == 'priority':
@@ -1185,7 +1481,7 @@ def update_task_interactive(task_manager):
             elif field == 'tags':
                 # Offer to add or remove tags
                 current_tags = task.tags if task.tags else []
-                print(f"Current tags: {', '.join(current_tags) if current_tags else '(none)'}")
+                console.print(f"[bold]Current tags:[/bold] {', '.join(current_tags) if current_tags else '[dim](none)[/dim]'}")
 
                 tag_action_question = [
                     inquirer.List('action',
@@ -1199,14 +1495,14 @@ def update_task_interactive(task_manager):
                 action = action_answer['action']
 
                 if action == 'add':
-                    new_tags_input = input("Enter tags to add, separated by commas: ").strip()
+                    new_tags_input = Prompt.ask("Enter tags to add, separated by commas", default="")
                     if new_tags_input:
                         new_tags = [sanitize_input(tag.strip()) for tag in new_tags_input.split(',') if tag.strip()]
                         if validate_task_tags(new_tags):
                             all_tags = list(set(current_tags + new_tags))  # Remove duplicates
                             updates['add_tags'] = new_tags
                         else:
-                            print("Error: Invalid tags.")
+                            console.print("[red]Error: Invalid tags.[/red]")
                             continue
                 elif action == 'remove':
                     if current_tags:
@@ -1221,7 +1517,7 @@ def update_task_interactive(task_manager):
                         remove_tags = [tag for tag in remove_answer['tags'] if tag != '(cancel)']
                         updates['remove_tags'] = remove_tags
                 elif action == 'replace':
-                    replace_tags_input = input("Enter new tags, separated by commas: ").strip()
+                    replace_tags_input = Prompt.ask("Enter new tags, separated by commas", default="")
                     if replace_tags_input:
                         replace_tags = [sanitize_input(tag.strip()) for tag in replace_tags_input.split(',') if tag.strip()]
                         if validate_task_tags(replace_tags):
@@ -1229,10 +1525,10 @@ def update_task_interactive(task_manager):
                             updates['remove_tags'] = current_tags
                             updates['add_tags'] = replace_tags
                         else:
-                            print("Error: Invalid tags.")
+                            console.print("[red]Error: Invalid tags.[/red]")
                             continue
             elif field == 'due_date':
-                due_date_input = input(f"Enter new due date (YYYY-MM-DD format, current: {task.due_date or '(none)'}): ").strip()
+                due_date_input = Prompt.ask(f"Enter new due date (YYYY-MM-DD format, current: {task.due_date or '(none)'}): ", default="")
                 if due_date_input.lower() == 'none' or due_date_input == '':
                     updates['due_date'] = None
                 else:
@@ -1240,54 +1536,74 @@ def update_task_interactive(task_manager):
                     if validate_task_due_date(due_date):
                         updates['due_date'] = due_date
                     else:
-                        print("Error: Invalid date format.")
+                        console.print("[red]Error: Invalid date format.[/red]")
                         continue
 
         # Confirm update
         if updates:
+            # Show what will be updated
+            update_details = []
+            if 'title' in updates:
+                update_details.append(f"Title: {updates['title']}")
+            if 'description' in updates:
+                update_details.append(f"Description: {updates['description'] or '(none)'}")
+            if 'priority' in updates:
+                update_details.append(f"Priority: {updates['priority']}")
+            if 'add_tags' in updates:
+                update_details.append(f"Add Tags: {', '.join(updates['add_tags'])}")
+            if 'remove_tags' in updates:
+                update_details.append(f"Remove Tags: {', '.join(updates['remove_tags'])}")
+            if 'due_date' in updates:
+                update_details.append(f"Due Date: {updates['due_date'] or '(none)'}")
+
+            update_text = "\n".join(update_details)
+            console.print(Panel(update_text, title="Update Details", border_style="yellow"))
+
             confirm_question = [
                 inquirer.Confirm('confirm',
                                message="Update task with these changes?")
             ]
             confirm_answer = inquirer.prompt(confirm_question)
             if not confirm_answer or not confirm_answer['confirm']:
-                print("Update cancelled.")
+                console.print("[yellow]Update cancelled.[/yellow]")
+                input("Press Enter to continue...")
                 return
 
             # Perform update
             updated_task = task_manager.update_task(task_id, **updates)
             if updated_task:
-                print(f"Task {task_id} updated successfully.")
+                console.print(f"[green]Task {task_id} updated successfully.[/green]")
             else:
-                print(f"Error: Failed to update task {task_id}.")
+                console.print(f"[red]Error: Failed to update task {task_id}.[/red]")
         else:
-            print("No updates made.")
+            console.print("[yellow]No updates made.[/yellow]")
 
         input("Press Enter to continue...")
 
     except ValueError:
-        print("Error: Invalid input.")
+        console.print("[red]Error: Invalid input.[/red]")
         input("Press Enter to continue...")
     except KeyboardInterrupt:
-        print("\nOperation cancelled.")
+        console.print("\n[yellow]Operation cancelled.[/yellow]")
     except EOFError:
-        print("\nOperation cancelled.")
+        console.print("\n[yellow]Operation cancelled.[/yellow]")
 
 
 def delete_task_interactive(task_manager):
     """Interactive task deletion"""
     try:
         import inquirer
+        console = Console()
 
         # Get all tasks to show as options
         tasks = task_manager.tasks
         if not tasks:
-            print("No tasks available.")
+            console.print("[yellow]No tasks available.[/yellow]")
             input("Press Enter to continue...")
             return
 
         # Create choices for task IDs
-        task_choices = [f"{task.id}: {task.title}" for task in tasks]
+        task_choices = [f"{task.id}: {task.title[:30]}{'...' if len(task.title) > 30 else ''}" for task in tasks]
         task_choices.append('(cancel)')
 
         task_question = [
@@ -1306,9 +1622,20 @@ def delete_task_interactive(task_manager):
 
         task = task_manager.find_task(task_id)
         if not task:
-            print(f"Error: Task with ID {task_id} not found.")
+            console.print(f"[red]Error: Task with ID {task_id} not found.[/red]")
             input("Press Enter to continue...")
             return
+
+        # Show task details before confirmation
+        task_details = f"""
+ID: {task.id}
+Title: {task.title}
+Description: {task.description or '(none)'}
+Priority: {task.priority}
+Tags: {', '.join(task.tags) if task.tags else '(none)'}
+Due Date: {task.due_date or '(none)'}
+        """
+        console.print(Panel(task_details.strip(), title="Task to Delete", border_style="red"))
 
         # Confirm deletion
         confirm_question = [
@@ -1317,30 +1644,37 @@ def delete_task_interactive(task_manager):
         ]
         confirm_answer = inquirer.prompt(confirm_question)
         if not confirm_answer or not confirm_answer['confirm']:
-            print("Deletion cancelled.")
+            console.print("[yellow]Deletion cancelled.[/yellow]")
+            input("Press Enter to continue...")
             return
 
-        success = task_manager.delete_task(task_id)
+        # Show loading indicator while deleting task
+        with console.status(f"[bold red]Deleting task {task_id}...", spinner="clock"):
+            import time
+            time.sleep(0.3)  # Simulate processing time
+            success = task_manager.delete_task(task_id)
+
         if success:
-            print(f"Task {task_id} deleted successfully.")
+            console.print(f"[green]✓ Task {task_id} deleted successfully.[/green]")
         else:
-            print(f"Error: Failed to delete task {task_id}.")
+            console.print(f"[red]Error: Failed to delete task {task_id}.[/red]")
 
         input("Press Enter to continue...")
 
     except ValueError:
-        print("Error: Invalid task ID.")
+        console.print("[red]Error: Invalid task ID.[/red]")
         input("Press Enter to continue...")
     except KeyboardInterrupt:
-        print("\nOperation cancelled.")
+        console.print("\n[yellow]Operation cancelled.[/yellow]")
     except EOFError:
-        print("\nOperation cancelled.")
+        console.print("\n[yellow]Operation cancelled.[/yellow]")
 
 
 def search_tasks_interactive(task_manager):
     """Interactive task search"""
     try:
         import inquirer
+        console = Console()
 
         # Get search query
         query_question = [
@@ -1352,7 +1686,7 @@ def search_tasks_interactive(task_manager):
 
         query = sanitize_input(query_answer['query'])
         if not query:
-            print("Error: Search query cannot be empty.")
+            console.print("[red]Error: Search query cannot be empty.[/red]")
             input("Press Enter to continue...")
             return
 
@@ -1382,33 +1716,54 @@ def search_tasks_interactive(task_manager):
         results = search_tasks(task_manager.tasks, query, search_in_title, search_in_description, search_in_tags)
 
         if not results:
-            print("No tasks found matching the search query.")
+            console.print("[yellow]No tasks found matching the search query.[/yellow]")
             input("Press Enter to continue...")
             return
 
-        # Display search results in the same format as list command
-        print(f"{'ID':<4} {'Status':<8} {'Priority':<8} {'Title':<30} {'Description':<30} {'Due Date':<12} {'Tags'}")
-        print("-" * 120)
+        # Create a rich table for displaying search results
+        table = Table(title=f"Search Results for '{query}'", box=ROUNDED, border_style="blue")
+        table.add_column("ID", style="cyan", no_wrap=True)
+        table.add_column("Status", style="magenta")
+        table.add_column("Priority", style="green")
+        table.add_column("Title", style="bold")
+        table.add_column("Description")
+        table.add_column("Due Date", style="yellow")
+        table.add_column("Tags", style="dim")
+
         for task in results:
-            status_indicator = "[x]" if task.completed else "[ ]"
+            status_indicator = "[green]✓[/green]" if task.completed else "[red]○[/red]"
+            priority_color = {"high": "[red]HIGH[/red]", "medium": "[yellow]MEDIUM[/yellow]", "low": "[green]LOW[/green]"}
+            priority_display = priority_color[task.priority]
+
             title = task.title[:27] + "..." if len(task.title) > 30 else task.title
-            description = (task.description[:27] + "..." if task.description and len(task.description) > 30 else (task.description or "")) if task.description else ""
+            description = task.description
             due_date_str = task.due_date or ""
             tags_str = ",".join(task.tags) if task.tags else ""
-            print(f"{task.id:<4} {status_indicator:<8} {task.priority:<8} {title:<30} {description:<30} {due_date_str:<12} {tags_str}")
 
+            table.add_row(
+                str(task.id),
+                status_indicator,
+                priority_display,
+                title,
+                description,
+                due_date_str,
+                tags_str
+            )
+
+        console.print(table)
         input("Press Enter to continue...")
 
     except KeyboardInterrupt:
-        print("\nOperation cancelled.")
+        console.print("\n[yellow]Operation cancelled.[/yellow]")
     except EOFError:
-        print("\nOperation cancelled.")
+        console.print("\n[yellow]Operation cancelled.[/yellow]")
 
 
 def tag_tasks_interactive(task_manager):
     """Interactive tag operations"""
     try:
         import inquirer
+        console = Console()
 
         # Main tag operations menu
         tag_operations = [
@@ -1437,11 +1792,9 @@ def tag_tasks_interactive(task_manager):
                     all_tags.add(tag)
 
             if not all_tags:
-                print("No tags found.")
+                console.print("[yellow]No tags found.[/yellow]")
             else:
-                print("Available tags:")
-                for tag in sorted(all_tags):
-                    print(f"  - {tag}")
+                console.print(Panel("\n".join([f"  • {tag}" for tag in sorted(all_tags)]), title="Available Tags", border_style="blue"))
 
             input("Press Enter to continue...")
 
@@ -1453,7 +1806,7 @@ def tag_tasks_interactive(task_manager):
                     all_tags.add(tag)
 
             if not all_tags:
-                print("No tags available.")
+                console.print("[yellow]No tags available.[/yellow]")
                 input("Press Enter to continue...")
                 return
 
@@ -1474,48 +1827,73 @@ def tag_tasks_interactive(task_manager):
             matching_tasks = [task for task in task_manager.tasks if tag_to_find in task.tags]
 
             if not matching_tasks:
-                print(f"No tasks found with tag '{tag_to_find}'.")
+                console.print(f"[yellow]No tasks found with tag '{tag_to_find}'.[/yellow]")
             else:
-                # Display matching tasks
-                print(f"Tasks with tag '{tag_to_find}':")
-                print(f"{'ID':<4} {'Status':<8} {'Priority':<8} {'Title':<30} {'Description':<30} {'Due Date':<12} {'Tags'}")
-                print("-" * 120)
+                # Create a rich table for displaying matching tasks
+                table = Table(title=f"Tasks with tag '{tag_to_find}'", box=ROUNDED, border_style="blue")
+                table.add_column("ID", style="cyan", no_wrap=True)
+                table.add_column("Status", style="magenta")
+                table.add_column("Priority", style="green")
+                table.add_column("Title", style="bold")
+                table.add_column("Description")
+                table.add_column("Due Date", style="yellow")
+                table.add_column("Tags", style="dim")
+
                 for task in matching_tasks:
-                    status_indicator = "[x]" if task.completed else "[ ]"
+                    status_indicator = "[green]✓[/green]" if task.completed else "[red]○[/red]"
+                    priority_color = {"high": "[red]HIGH[/red]", "medium": "[yellow]MEDIUM[/yellow]", "low": "[green]LOW[/green]"}
+                    priority_display = priority_color[task.priority]
+
                     title = task.title[:27] + "..." if len(task.title) > 30 else task.title
                     description = (task.description[:27] + "..." if task.description and len(task.description) > 30 else (task.description or "")) if task.description else ""
                     due_date_str = task.due_date or ""
                     tags_str = ",".join(task.tags) if task.tags else ""
-                    print(f"{task.id:<4} {status_indicator:<8} {task.priority:<8} {title:<30} {description:<30} {due_date_str:<12} {tags_str}")
+
+                    table.add_row(
+                        str(task.id),
+                        status_indicator,
+                        priority_display,
+                        title,
+                        description,
+                        due_date_str,
+                        tags_str
+                    )
+
+                console.print(table)
 
             input("Press Enter to continue...")
 
     except KeyboardInterrupt:
-        print("\nOperation cancelled.")
+        console.print("\n[yellow]Operation cancelled.[/yellow]")
     except EOFError:
-        print("\nOperation cancelled.")
+        console.print("\n[yellow]Operation cancelled.[/yellow]")
 
 
 def show_help_interactive():
     """Display help information"""
-    print("\nCLI Todo Application Help")
-    print("=" * 40)
-    print("This application helps you manage your tasks efficiently.")
-    print("\nAvailable Operations:")
-    print("  Add      - Create new tasks with title, description, priority, tags, and due date")
-    print("  List     - View tasks with filtering and sorting options")
-    print("  Complete - Mark tasks as complete/incomplete")
-    print("  Update   - Modify existing task details")
-    print("  Delete   - Remove tasks from your list")
-    print("  Search   - Find tasks by keyword in title, description, or tags")
-    print("  Tag      - View available tags or filter tasks by tag")
-    print("  Help     - Show this help information")
-    print("  Exit     - Quit the application")
-    print("\nTips:")
-    print("- Use arrow keys to navigate menus")
-    print("- Press Enter to select options")
-    print("- Press Ctrl+C at any time to cancel and return to main menu")
-    print("=" * 40)
+    console = Console()
+
+    help_text = """
+This application helps you manage your tasks efficiently.
+
+[bold]Available Operations:[/bold]
+  [green]📝 Add[/green]      - Create new tasks with title, description, priority, tags, and due date
+  [green]📋 List[/green]     - View tasks with filtering and sorting options
+  [green]✅ Complete[/green] - Mark tasks as complete/incomplete
+  [green]🔄 Update[/green]   - Modify existing task details
+  [green]🗑️ Delete[/green]   - Remove tasks from your list
+  [green]🔍 Search[/green]   - Find tasks by keyword in title, description, or tags
+  [green]🏷️ Tag[/green]      - View available tags or filter tasks by tag
+  [green]❓ Help[/green]     - Show this help information
+  [green]🚪 Exit[/green]     - Quit the application
+
+[bold]Tips:[/bold]
+  • Use arrow keys to navigate menus
+  • Press Enter to select options
+  • Press Ctrl+C at any time to cancel and return to main menu
+    """
+
+    console.print(Panel(help_text, title="📋 CLI Todo Application Help", border_style="blue"))
     input("Press Enter to continue...")
 
 
@@ -1524,6 +1902,9 @@ if __name__ == '__main__':
     import sys
     if len(sys.argv) > 1:
         # Use Click's normal command-line interface
+        # Run recurring task check before executing commands
+        task_manager = TaskManager()
+        task_manager.check_and_create_recurring_tasks()
         cli()
     else:
         # Run in interactive mode
